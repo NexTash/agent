@@ -47,7 +47,7 @@ class Base:
             data.update(
                 {
                     "output": output,
-                    "returncode": e.returncode,
+                    "returncode": f"{e.returncode} fasi",
                     "traceback": "".join(traceback.format_exc()),
                 }
             )
