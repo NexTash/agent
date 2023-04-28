@@ -4,12 +4,13 @@ import re
 import shutil
 import time
 from datetime import datetime
+from typing import Dict
 
 import requests
 
 from agent.base import Base
 from agent.job import job, step
-from agent.utils import get_size, b2mb
+from agent.utils import b2mb, get_size
 
 
 class Site(Base):
@@ -458,12 +459,24 @@ class Site(Base):
             data["tables"][table] = output
         return data
 
+    @step("Run Before Migrate Scripts")
+    def run_before_migrate_scripts(self, scripts: Dict[str, str]):
+        for app_name in scripts:
+            script = scripts[app_name]
+            self.bench_execute("console", input=script)
+
     @step("Migrate Site")
-    def migrate(self, skip_failing_patches=False):
+    def migrate(self, skip_search_index=False, skip_failing_patches=False):
+        cmd = "migrate"
+        if skip_search_index:
+            cmd += " --skip-search-index"
         if skip_failing_patches:
-            return self.bench_execute("migrate --skip-failing")
-        else:
-            return self.bench_execute("migrate")
+            cmd += " --skip-failing"
+        return self.bench_execute(cmd)
+
+    @step("Build Search Index")
+    def build_search_index(self):
+        return self.bench_execute("build-search-index")
 
     @job("Clear Cache")
     def clear_cache_job(self):
@@ -594,7 +607,11 @@ print(">>>" + frappe.session.sid + "<<<")
 """
 
         output = self.bench_execute("console", input=code)["output"]
-        return re.search(r">>>(.*)<<<", output).group(1)
+        sid = re.search(r">>>(.*)<<<", output).group(1)
+        if not sid or sid == user:  # case when it fails
+            output = self.bench_execute(f"browse --user {user}")["output"]
+            sid = re.search(r"\?sid=([a-z0-9]*)", output).group(1)
+        return sid
 
     @property
     def timezone(self):
