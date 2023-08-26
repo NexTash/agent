@@ -459,8 +459,8 @@ class Site(Base):
             data["tables"][table] = output
         return data
 
-    @step("Run Before Migrate Scripts")
-    def run_before_migrate_scripts(self, scripts: Dict[str, str]):
+    @step("Run App Specific Scripts")
+    def run_app_scripts(self, scripts: Dict[str, str]):
         for app_name in scripts:
             script = scripts[app_name]
             self.bench_execute("console", input=script)
@@ -503,13 +503,6 @@ class Site(Base):
 
     @step("Disable Maintenance Mode")
     def disable_maintenance_mode(self):
-        try:
-            self.bench_execute(
-                "execute frappe.modules.patch_handler.block_user "
-                "--args False,",
-            )
-        except Exception:
-            pass
         return self.bench_execute("set-maintenance-mode off")
 
     @step("Restore Touched Tables")
@@ -656,7 +649,7 @@ print(">>>" + frappe.session.sid + "<<<")
         return {"backups": backup_files, "offsite": uploaded_files}
 
     def fetch_latest_backup(self, with_files=True):
-        databases, publics, privates = [], [], []
+        databases, publics, privates, site_configs = [], [], [], []
         backup_directory = os.path.join(self.directory, "private", "backups")
 
         for file in os.listdir(backup_directory):
@@ -671,8 +664,15 @@ print(">>>" + frappe.session.sid + "<<<")
                 privates.append(path)
             elif file.endswith("files.tar") or file.endswith("files-enc.tar"):
                 publics.append(path)
+            elif file.endswith("site_config_backup.json") or file.endswith(
+                "site_config_backup-enc.json"
+            ):
+                site_configs.append(path)
 
-        backups = {"database": {"path": max(databases, key=os.path.getmtime)}}
+        backups = {
+            "database": {"path": max(databases, key=os.path.getmtime)},
+            "site_config": {"path": max(site_configs, key=os.path.getmtime)},
+        }
 
         if with_files:
             backups["private"] = {"path": max(privates, key=os.path.getmtime)}

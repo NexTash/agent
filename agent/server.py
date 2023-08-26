@@ -26,7 +26,11 @@ class Server(Base):
             os.path.dirname(self.benches_directory), "archived"
         )
         self.nginx_directory = self.config["nginx_directory"]
+        self.hosts_directory = os.path.join(self.nginx_directory, "hosts")
 
+        self.error_pages_directory = os.path.join(
+            self.directory, "repo", "agent", "pages"
+        )
         self.job = None
         self.step = None
 
@@ -96,7 +100,9 @@ class Server(Base):
         Throw if container exists
         """
         try:
-            self.execute(f"""docker ps --filter "name={name}" | grep {name}""")
+            self.execute(
+                f"""docker ps --filter "name=^{name}$" | grep {name}"""
+            )
         except AgentException:
             pass  # container does not exist
         else:
@@ -232,7 +238,8 @@ class Server(Base):
         activate,
         skip_failing_patches,
         skip_backups,
-        before_migrate_scripts: Dict[str, str],
+        before_migrate_scripts: Dict[str, str] = {},
+        skip_search_index=True,
     ):
         source = Bench(source, self)
         target = Bench(target, self)
@@ -254,10 +261,11 @@ class Server(Base):
         site = Site(name, target)
 
         if before_migrate_scripts:
-            site.run_before_migrate_scripts(before_migrate_scripts)
+            site.run_app_scripts(before_migrate_scripts)
 
         site.migrate(
-            skip_search_index=True, skip_failing_patches=skip_failing_patches
+            skip_search_index=skip_search_index,
+            skip_failing_patches=skip_failing_patches,
         )
 
         try:
@@ -271,10 +279,15 @@ class Server(Base):
 
         if activate:
             site.disable_maintenance_mode()
-        site.build_search_index()
+        try:
+            site.build_search_index()
+        except Exception:
+            pass  # Don't fail job on failure; v12 does not have build_search_index command
 
     @job("Recover Failed Site Migrate", priority="high")
-    def update_site_recover_migrate_job(self, name, source, target, activate):
+    def update_site_recover_migrate_job(
+        self, name, source, target, activate, rollback_scripts
+    ):
         source = Bench(source, self)
         target = Bench(target, self)
 
@@ -287,6 +300,9 @@ class Server(Base):
 
         site = Site(name, target)
         site.restore_touched_tables()
+
+        if rollback_scripts:
+            site.run_app_scripts(rollback_scripts)
 
         if activate:
             site.disable_maintenance_mode()
@@ -653,7 +669,10 @@ class Server(Base):
         nginx_config = os.path.join(self.nginx_directory, "nginx.conf")
         self._render_template(
             "nginx/nginx.conf.jinja2",
-            {},
+            {
+                "proxy_ip": self.config.get("proxy_ip"),
+                "tls_protocols": self.config.get("tls_protocols"),
+            },
             nginx_config,
         )
 
@@ -674,6 +693,7 @@ class Server(Base):
                 "pages_directory": os.path.join(
                     self.directory, "repo", "agent", "pages"
                 ),
+                "tls_protocols": self.config.get("tls_protocols"),
             },
             agent_nginx_config,
         )
@@ -737,3 +757,11 @@ class Server(Base):
         self,
     ):
         return self.long_step()
+
+    @property
+    def wildcards(self) -> List[str]:
+        wildcards = []
+        for host in os.listdir(self.hosts_directory):
+            if "*" in host:
+                wildcards.append(host.strip("*."))
+        return wildcards

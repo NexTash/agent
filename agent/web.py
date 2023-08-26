@@ -16,6 +16,7 @@ from agent.monitor import Monitor
 from agent.database import DatabaseServer
 from agent.proxysql import ProxySQL
 from agent.minio import Minio
+from agent.security import Security
 
 
 application = Flask(__name__)
@@ -112,6 +113,12 @@ def restart_nginx():
     return {"job": job}
 
 
+@application.route("/proxy/reload", methods=["POST"])
+def reload_nginx():
+    job = Proxy().reload_nginx_job()
+    return {"job": job}
+
+
 @application.route("/server/status", methods=["POST"])
 def get_server_status():
     data = request.json
@@ -194,6 +201,16 @@ def get_logs(bench, site):
 def get_log(bench, site, log):
     return {log: Server().benches[bench].sites[site].retrieve_log(log)}
 
+
+@application.route("/security/ssh_session_logs")
+def get_ssh_session_logs():
+    return {"logs": Security().ssh_session_logs}
+
+
+@application.route("/security/retrieve_ssh_session_log/<string:filename>")
+def retrieve_ssh_session_log(filename):
+    return {'log_details': Security().retrieve_ssh_session_log(filename)}
+    
 
 @application.route("/benches/<string:bench>/sites/<string:site>/sid")
 def get_site_sid(bench, site):
@@ -430,7 +447,8 @@ def update_site_migrate(bench, site):
         data.get("activate", True),
         data.get("skip_failing_patches", False),
         data.get("skip_backups", False),
-        data.get("before_migrate_scripts", {})
+        data.get("before_migrate_scripts", {}),
+        data.get("skip_search_index", True),
     )
     return {"job": job}
 
@@ -453,7 +471,11 @@ def update_site_pull(bench, site):
 def update_site_recover_migrate(bench, site):
     data = request.json
     job = Server().update_site_recover_migrate_job(
-        site, bench, data["target"], data.get("activate", True)
+        site,
+        bench,
+        data["target"],
+        data.get("activate", True),
+        data.get("rollback_scripts", {}),
     )
     return {"job": job}
 
@@ -658,7 +680,8 @@ def proxy_add_upstream_site(upstream):
     methods=["DELETE"],
 )
 def proxy_remove_upstream_site(upstream, site):
-    job = Proxy().remove_site_from_upstream_job(upstream, site)
+    data = request.json
+    job = Proxy().remove_site_from_upstream_job(upstream, site, data.get("skip_reload", False))
     return {"job": job}
 
 
@@ -683,7 +706,9 @@ def proxy_rename_upstream_site(upstream, site):
 )
 def update_site_status(upstream, site):
     data = request.json
-    job = Proxy().update_site_status_job(upstream, site, data["status"])
+    job = Proxy().update_site_status_job(
+        upstream, site, data["status"], data.get("skip_reload", False)
+    )
     return {"job": job}
 
 
@@ -725,6 +750,12 @@ def get_binary_log(log):
             data["max_lines"],
         )
     )
+
+
+@application.route("/database/deadlocks", methods=["POST"])
+def get_database_deadlocks():
+    data = request.json
+    return jsonify(DatabaseServer().get_deadlocks(**data))
 
 
 @application.route("/ssh/users", methods=["POST"])
@@ -883,6 +914,41 @@ def move_site_to_bench(bench, site):
         data.get("deactivate", True),
         data.get("activate", True),
         data.get("skip_failing_patches", False),
+    )
+    return {"job": job}
+
+
+@application.route("/benches/<string:bench>/codeserver", methods=["POST"])
+def setup_code_server(bench):
+    data = request.json
+    job = Server().benches[bench].setup_code_server(**data)
+
+    return {"job": job}
+
+
+@application.route(
+    "/benches/<string:bench>/codeserver/start", methods=["POST"]
+)
+def start_code_server(bench):
+    data = request.json
+    job = Server().benches[bench].start_code_server(**data)
+    return {"job": job}
+
+
+@application.route("/benches/<string:bench>/codeserver/stop", methods=["POST"])
+def stop_code_server(bench):
+    job = Server().benches[bench].stop_code_server()
+    return {"job": job}
+
+
+@application.route(
+    "/benches/<string:bench>/codeserver/archive", methods=["POST"]
+)
+def archive_code_server(bench):
+    job = (
+        Server()
+        .benches[bench]
+        .archive_code_server()
     )
     return {"job": job}
 

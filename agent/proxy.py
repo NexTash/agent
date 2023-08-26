@@ -8,6 +8,7 @@ from collections import defaultdict
 
 from agent.job import job, step
 from agent.server import Server
+from configparser import ConfigParser
 
 
 class Proxy(Server):
@@ -68,6 +69,8 @@ class Proxy(Server):
             for key, value in wildcard["certificate"].items():
                 with open(os.path.join(host_directory, key), "w") as f:
                     f.write(value)
+            if wildcard.get("code_server"):
+                Path(os.path.join(host_directory, "codeserver")).touch()
 
     @job("Add Site to Upstream")
     def add_site_to_upstream_job(self, upstream, site):
@@ -117,11 +120,13 @@ class Proxy(Server):
         shutil.rmtree(host_directory)
 
     @job("Remove Site from Upstream")
-    def remove_site_from_upstream_job(self, upstream, site):
+    def remove_site_from_upstream_job(self, upstream, site, skip_reload=False):
         upstream_directory = os.path.join(self.upstreams_directory, upstream)
         site_file = os.path.join(upstream_directory, site)
         if os.path.exists(site_file):
             self.remove_site_from_upstream(site_file)
+        if skip_reload:
+            return
         self.generate_proxy_config()
         self.reload_nginx()
 
@@ -180,8 +185,12 @@ class Proxy(Server):
         os.rename(old_site_file, new_site_file)
 
     @job("Update Site Status")
-    def update_site_status_job(self, upstream, site, status):
+    def update_site_status_job(
+        self, upstream, site, status, skip_reload=False
+    ):
         self.update_site_status(upstream, site, status)
+        if skip_reload:
+            return
         self.generate_proxy_config()
         self.reload_nginx()
 
@@ -237,6 +246,11 @@ class Proxy(Server):
     def reload_nginx(self):
         return self.execute("sudo systemctl reload nginx")
 
+    @job("Reload NGINX Job")
+    def reload_nginx_job(self):
+        self.generate_proxy_config()
+        self.reload_nginx()
+
     @step("Generate NGINX Configuration")
     def generate_proxy_config(self):
         return self._generate_proxy_config()
@@ -252,6 +266,7 @@ class Proxy(Server):
                 "wildcards": self.wildcards,
                 "nginx_directory": self.config["nginx_directory"],
                 "error_pages_directory": self.error_pages_directory,
+                "tls_protocols": self.config.get("tls_protocols"),
             },
             proxy_config_file,
         )
@@ -324,6 +339,12 @@ class Proxy(Server):
                     if "*" in host:
                         hosts[_from] = {_from: _from}
                     hosts[_from]["redirect"] = to
+            hosts[host]["codeserver"] = (
+                True
+                if os.path.exists(os.path.join(host_directory, "codeserver"))
+                else False
+            )
+
         return hosts
 
     @property
