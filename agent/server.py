@@ -14,6 +14,8 @@ from agent.base import AgentException, Base
 from agent.bench import Bench
 from agent.job import Job, Step, job, step
 from agent.site import Site
+from agent.patch_handler import run_patches
+from agent.exceptions import BenchNotExistsException
 
 
 class Server(Base):
@@ -282,7 +284,9 @@ class Server(Base):
         try:
             site.build_search_index()
         except Exception:
-            pass  # Don't fail job on failure; v12 does not have build_search_index command
+            # Don't fail job on failure
+            # v12 does not have build_search_index command
+            pass
 
     @job("Recover Failed Site Migrate", priority="high")
     def update_site_recover_migrate_job(
@@ -367,6 +371,24 @@ class Server(Base):
 
     @step("Move Site")
     def move_site(self, site, target):
+        destination = os.path.join(target.sites_directory, site.name)
+        destination_site_config = os.path.join(destination, "site_config.json")
+        if os.path.exists(destination) and not os.path.exists(
+            destination_site_config
+        ):
+            # If there's already a site directory in the destination bench
+            # and it does not have a site_config.json file,
+            # then it is an incomplete site directory.
+            # Move it to the sites/archived directory
+            archived_sites_directory = os.path.join(
+                target.sites_directory, "archived"
+            )
+            os.makedirs(archived_sites_directory, exist_ok=True)
+            archived_site_path = os.path.join(
+                archived_sites_directory,
+                f"{site.name}-{datetime.now().isoformat()}",
+            )
+            shutil.move(destination, archived_site_path)
         shutil.move(site.directory, target.sites_directory)
 
     def execute(self, command, directory=None, skip_output_log=False):
@@ -447,6 +469,12 @@ class Server(Base):
                 pass
         return benches
 
+    def get_bench(self, bench):
+        try:
+            return self.benches[bench]
+        except KeyError:
+            raise BenchNotExistsException(bench).with_traceback()
+
     @property
     def job_record(self):
         if self.job is None:
@@ -485,6 +513,7 @@ class Server(Base):
             self.execute(f"sudo supervisorctl restart {worker_name}")
 
         self.execute("sudo supervisorctl restart agent:web")
+        run_patches()
 
     def update_agent_cli(self):
         directory = os.path.join(self.directory, "repo")
@@ -501,6 +530,7 @@ class Server(Base):
         self.setup_supervisor()
 
         self.setup_nginx()
+        run_patches()
 
     def get_agent_version(self):
         directory = os.path.join(self.directory, "repo")

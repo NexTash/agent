@@ -17,6 +17,7 @@ from agent.base import AgentException, Base
 from agent.job import job, step
 from agent.site import Site
 from agent.utils import download_file, get_size
+from agent.exceptions import SiteNotExistsException
 
 
 class Bench(Base):
@@ -373,7 +374,7 @@ class Bench(Base):
     @step("Archive Site")
     def bench_archive_site(self, name, mariadb_root_password, force):
         site_database, temp_user, temp_password = self.create_mariadb_user(
-            name, mariadb_root_password, self.sites[name].database
+            name, mariadb_root_password, self.valid_sites[name].database
         )
         force_flag = "--force" if force else ""
         try:
@@ -432,7 +433,7 @@ class Bench(Base):
     def generate_nginx_config(self):
         domains = {}
         sites = []
-        for site in self.sites.values():
+        for site in self.valid_sites.values():
             sites.append(site)
             for domain in site.config.get("domains", []):
                 domains[domain] = site.name
@@ -499,6 +500,14 @@ class Bench(Base):
             f"bench restart {'--web' if web_only else ''}"
         )
 
+    @job("Rebuild Bench Assets")
+    def rebuild_job(self):
+        return self.rebuild()
+
+    @step("Rebuild Bench Assets")
+    def rebuild(self, web_only=False):
+        return self.docker_execute("bench build")
+
     @property
     def apps(self):
         with open(self.apps_file, "r") as f:
@@ -529,6 +538,7 @@ class Bench(Base):
         self.setup_nginx()
         if self.bench_config.get("single_container"):
             self.update_supervisor()
+            self.update_runtime_limits()
             if (old_config["web_port"] != bench_config["web_port"]) or (
                 old_config["socketio_port"] != bench_config["socketio_port"]
             ):
@@ -603,7 +613,8 @@ class Bench(Base):
             self.docker_execute("supervisorctl start code-server:")
 
         self.docker_execute(
-            f"sed -i 's/^password:.*/password: {password}/' /home/frappe/.config/code-server/config.yaml"
+            f"sed -i 's/^password:.*/password: {password}/'"
+            " /home/frappe/.config/code-server/config.yaml"
         )
         self.docker_execute("supervisorctl restart code-server:")
 
@@ -673,19 +684,89 @@ class Bench(Base):
         else:
             return self.execute(f"docker stack rm {self.name}")
 
+    @step("Stop Bench")
+    def _stop(self):
+        return self.execute(f"docker stop {self.name}")
+
+    @step("Start Bench")
+    def _start(self):
+        return self.execute(f"docker start {self.name}")
+
+    @job("Force Update Bench Limits")
+    def force_update_limits(self, memory_high, memory_max, memory_swap, vcpu):
+        self._stop()
+        self._update_runtime_limits(memory_high, memory_max, memory_swap, vcpu)
+        self._start()
+
+    def update_runtime_limits(self):
+        memory_high = self.bench_config.get("memory_high")
+        memory_max = self.bench_config.get("memory_max")
+        memory_swap = self.bench_config.get("memory_swap")
+        vcpu = self.bench_config.get("vcpu")
+        if not any([memory_high, memory_max, memory_swap, vcpu]):
+            return
+        self._update_runtime_limits(memory_high, memory_max, memory_swap, vcpu)
+
+    @step("Update Bench Memory Limits")
+    def _update_runtime_limits(
+        self, memory_high, memory_max, memory_swap, vcpu
+    ):
+        cmd = f"docker update {self.name}"
+        if memory_high:
+            cmd += f" --memory-reservation={memory_high}M"
+        if memory_max:
+            cmd += f" --memory={memory_max}M"
+        if memory_swap:
+            cmd += f" --memory-swap={memory_swap}M"
+        if vcpu:
+            cmd += f" --cpus={vcpu}"
+        return self.execute(cmd)
+
     @property
     def job_record(self):
         return self.server.job_record
 
+    def readable_jde_err(
+        self, title: str, jde: json.decoder.JSONDecodeError
+    ) -> str:
+        output = f"{title}:\n" f"{jde.doc}\n" f"{jde}\n"
+        import re
+
+        output = re.sub(r'("db_name":.* ")(\w*)(")', r"\1********\3", output)
+        output = re.sub(
+            r'("db_password":.* ")(\w*)(")', r"\1********\3", output
+        )
+        return output
+
     @property
-    def sites(self) -> Dict[str, Site]:
+    def sites(self):
+        return self._sites()
+
+    @property
+    def valid_sites(self):
+        return self._sites(validate_configs=True)
+
+    def _sites(self, validate_configs=False) -> Dict[str, Site]:
         sites = {}
         for directory in os.listdir(self.sites_directory):
             try:
                 sites[directory] = Site(directory, self)
+            except json.decoder.JSONDecodeError as jde:
+                output = self.readable_jde_err(
+                    f"Error parsing JSON in {directory}", jde
+                )
+                self.execute(
+                    f"echo '{output}';exit {int(validate_configs)}",
+                )  # exit 1 to make sure the job fails and shows output
             except Exception:
                 pass
         return sites
+
+    def get_site(self, site):
+        try:
+            return self.valid_sites[site]
+        except KeyError:
+            raise SiteNotExistsException(site, self.name)
 
     @property
     def step_record(self):

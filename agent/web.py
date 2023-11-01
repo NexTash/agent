@@ -4,9 +4,11 @@ import sys
 import traceback
 from base64 import b64decode
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, abort
 from playhouse.shortcuts import model_to_dict
 from passlib.hash import pbkdf2_sha256 as pbkdf2
+from functools import wraps
+
 
 from agent.proxy import Proxy
 from agent.ssh import SSHProxy
@@ -17,14 +19,37 @@ from agent.database import DatabaseServer
 from agent.proxysql import ProxySQL
 from agent.minio import Minio
 from agent.security import Security
+from agent.exceptions import BenchNotExistsException, SiteNotExistsException
 
 
 application = Flask(__name__)
 
+def validate_bench(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        bench = kwargs.get('bench')
+
+        if bench:
+            Server().get_bench(bench)
+
+        return fn(*args, **kwargs)
+    return wrapper
+
+def validate_bench_and_site(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        site = kwargs.get('site')
+        bench = kwargs.get('bench')
+
+        if bench:
+            bench_obj = Server().get_bench(bench)
+            bench_obj.get_site(site)
+
+        return fn(*args, **kwargs)
+    return wrapper
 
 log = logging.getLogger("werkzeug")
 log.handlers = []
-
 
 @application.before_request
 def validate_access_token():
@@ -137,11 +162,13 @@ def get_benches():
 
 
 @application.route("/benches/<string:bench>")
+@validate_bench
 def get_bench(bench):
     return Server().benches[bench].dump()
 
 
 @application.route("/benches/<string:bench>/info", methods=["POST", "GET"])
+@validate_bench
 def fetch_sites_info(bench):
     data = request.json
     since = data.get("since") if data else None
@@ -149,48 +176,57 @@ def fetch_sites_info(bench):
 
 
 @application.route("/benches/<string:bench>/analytics", methods=["GET"])
+@validate_bench
 def fetch_sites_analytics(bench):
     return Server().benches[bench].fetch_sites_analytics()
 
 
 @application.route("/benches/<string:bench>/sites")
+@validate_bench
 def get_sites(bench):
     sites = Server().benches[bench].sites
     return {name: site.dump() for name, site in sites.items()}
 
 
 @application.route("/benches/<string:bench>/apps")
+@validate_bench
 def get_apps(bench):
     apps = Server().benches[bench].apps
     return {name: site.dump() for name, site in apps.items()}
 
 
 @application.route("/benches/<string:bench>/config")
+@validate_bench
 def get_config(bench):
     return Server().benches[bench].config
 
 
 @application.route("/benches/<string:bench>/status", methods=["GET"])
+@validate_bench
 def get_bench_status(bench):
     return Server().benches[bench].status()
 
 
 @application.route("/benches/<string:bench>/logs")
+@validate_bench
 def get_bench_logs(bench):
     return jsonify(Server().benches[bench].logs)
 
 
 @application.route("/benches/<string:bench>/logs/<string:log>")
+@validate_bench
 def get_bench_log(bench, log):
     return {log: Server().benches[bench].retrieve_log(log)}
 
 
 @application.route("/benches/<string:bench>/sites/<string:site>")
+@validate_bench
 def get_site(bench, site):
     return Server().benches[bench].sites[site].dump()
 
 
 @application.route("/benches/<string:bench>/sites/<string:site>/logs")
+@validate_bench_and_site
 def get_logs(bench, site):
     return jsonify(Server().benches[bench].sites[site].logs)
 
@@ -198,6 +234,7 @@ def get_logs(bench, site):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/logs/<string:log>"
 )
+@validate_bench_and_site
 def get_log(bench, site, log):
     return {log: Server().benches[bench].sites[site].retrieve_log(log)}
 
@@ -209,10 +246,11 @@ def get_ssh_session_logs():
 
 @application.route("/security/retrieve_ssh_session_log/<string:filename>")
 def retrieve_ssh_session_log(filename):
-    return {'log_details': Security().retrieve_ssh_session_log(filename)}
-    
+    return {"log_details": Security().retrieve_ssh_session_log(filename)}
+
 
 @application.route("/benches/<string:bench>/sites/<string:site>/sid")
+@validate_bench_and_site
 def get_site_sid(bench, site):
     return {"sid": Server().benches[bench].sites[site].sid()}
 
@@ -225,15 +263,30 @@ def new_bench():
 
 
 @application.route("/benches/<string:bench>/archive", methods=["POST"])
+@validate_bench
 def archive_bench(bench):
     job = Server().archive_bench(bench)
     return {"job": job}
 
 
 @application.route("/benches/<string:bench>/restart", methods=["POST"])
+@validate_bench
 def restart_bench(bench):
     data = request.json
     job = Server().benches[bench].restart_job(**data)
+    return {"job": job}
+
+
+@application.route("/benches/<string:bench>/limits", methods=["POST"])
+def update_bench_limits(bench):
+    data = request.json
+    job = Server().benches[bench].force_update_limits(**data)
+    return {"job": job}
+
+
+@application.route("/benches/<string:bench>/rebuild", methods=["POST"])
+def rebuild_bench(bench):
+    job = Server().benches[bench].rebuild_job()
     return {"job": job}
 
 
@@ -253,6 +306,7 @@ POST /benches/bench-1/sites
 
 
 @application.route("/benches/<string:bench>/sites", methods=["POST"])
+@validate_bench
 def new_site(bench):
     data = request.json
     job = (
@@ -270,6 +324,7 @@ def new_site(bench):
 
 
 @application.route("/benches/<string:bench>/sites/restore", methods=["POST"])
+@validate_bench
 def new_site_from_backup(bench):
     data = request.json
 
@@ -295,6 +350,7 @@ def new_site_from_backup(bench):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/restore", methods=["POST"]
 )
+@validate_bench_and_site
 def restore_site(bench, site):
     data = request.json
 
@@ -318,6 +374,7 @@ def restore_site(bench, site):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/reinstall", methods=["POST"]
 )
+@validate_bench_and_site
 def reinstall_site(bench, site):
     data = request.json
     job = (
@@ -332,6 +389,7 @@ def reinstall_site(bench, site):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/rename", methods=["POST"]
 )
+@validate_bench_and_site
 def rename_site(bench, site):
     data = request.json
     job = Server().benches[bench].rename_site_job(site, data["new_name"])
@@ -339,8 +397,17 @@ def rename_site(bench, site):
 
 
 @application.route(
+    "/benches/<string:bench>/sites/<string:site>/optimize", methods=["POST"]
+)
+def optimize_tables(bench, site):
+    job = Server().benches[bench].sites[site].optimize_tables_job()
+    return {"job": job}
+
+
+@application.route(
     "/benches/<string:bench>/sites/<string:site>/apps", methods=["POST"]
 )
+@validate_bench_and_site
 def install_app_site(bench, site):
     data = request.json
     job = Server().benches[bench].sites[site].install_app_job(data["name"])
@@ -351,6 +418,7 @@ def install_app_site(bench, site):
     "/benches/<string:bench>/sites/<string:site>/apps/<string:app>",
     methods=["DELETE"],
 )
+@validate_bench_and_site
 def uninstall_app_site(bench, site, app):
     job = Server().benches[bench].sites[site].uninstall_app_job(app)
     return {"job": job}
@@ -359,6 +427,7 @@ def uninstall_app_site(bench, site, app):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/erpnext", methods=["POST"]
 )
+@validate_bench_and_site
 def setup_erpnext(bench, site):
     data = request.json
     job = (
@@ -371,6 +440,7 @@ def setup_erpnext(bench, site):
 
 
 @application.route("/benches/<string:bench>/monitor", methods=["POST"])
+@validate_bench
 def fetch_monitor_data(bench):
     return {"data": Server().benches[bench].fetch_monitor_data()}
 
@@ -378,6 +448,7 @@ def fetch_monitor_data(bench):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/status", methods=["GET"]
 )
+@validate_bench_and_site
 def fetch_site_status(bench, site):
     return {"data": Server().benches[bench].sites[site].fetch_site_status()}
 
@@ -385,6 +456,7 @@ def fetch_site_status(bench, site):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/info", methods=["GET"]
 )
+@validate_bench_and_site
 def fetch_site_info(bench, site):
     return {"data": Server().benches[bench].sites[site].fetch_site_info()}
 
@@ -392,6 +464,7 @@ def fetch_site_info(bench, site):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/analytics", methods=["GET"]
 )
+@validate_bench_and_site
 def fetch_site_analytics(bench, site):
     return {"data": Server().benches[bench].sites[site].fetch_site_analytics()}
 
@@ -399,10 +472,12 @@ def fetch_site_analytics(bench, site):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/backup", methods=["POST"]
 )
+@validate_bench_and_site
 def backup_site(bench, site):
     data = request.json or {}
     with_files = data.get("with_files")
     offsite = data.get("offsite")
+
     job = Server().benches[bench].sites[site].backup_job(with_files, offsite)
     return {"job": job}
 
@@ -411,6 +486,7 @@ def backup_site(bench, site):
     "/benches/<string:bench>/sites/<string:site>/migrate",
     methods=["POST"],
 )
+@validate_bench_and_site
 def migrate_site(bench, site):
     data = request.json
     job = (
@@ -429,6 +505,7 @@ def migrate_site(bench, site):
     "/benches/<string:bench>/sites/<string:site>/cache",
     methods=["DELETE"],
 )
+@validate_bench_and_site
 def clear_site_cache(bench, site):
     job = Server().benches[bench].sites[site].clear_cache_job()
     return {"job": job}
@@ -438,6 +515,7 @@ def clear_site_cache(bench, site):
     "/benches/<string:bench>/sites/<string:site>/update/migrate",
     methods=["POST"],
 )
+@validate_bench_and_site
 def update_site_migrate(bench, site):
     data = request.json
     job = Server().update_site_migrate_job(
@@ -456,6 +534,7 @@ def update_site_migrate(bench, site):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/update/pull", methods=["POST"]
 )
+@validate_bench_and_site
 def update_site_pull(bench, site):
     data = request.json
     job = Server().update_site_pull_job(
@@ -468,6 +547,7 @@ def update_site_pull(bench, site):
     "/benches/<string:bench>/sites/<string:site>/update/migrate/recover",
     methods=["POST"],
 )
+@validate_bench_and_site
 def update_site_recover_migrate(bench, site):
     data = request.json
     job = Server().update_site_recover_migrate_job(
@@ -484,6 +564,7 @@ def update_site_recover_migrate(bench, site):
     "/benches/<string:bench>/sites/<string:site>/update/migrate/restore",
     methods=["POST"],
 )
+@validate_bench_and_site
 def restore_site_tables(bench, site):
     data = request.json
     job = (
@@ -499,6 +580,7 @@ def restore_site_tables(bench, site):
     "/benches/<string:bench>/sites/<string:site>/update/pull/recover",
     methods=["POST"],
 )
+@validate_bench_and_site
 def update_site_recover_pull(bench, site):
     data = request.json
     job = Server().update_site_recover_pull_job(
@@ -511,6 +593,7 @@ def update_site_recover_pull(bench, site):
     "/benches/<string:bench>/sites/<string:site>/update/recover",
     methods=["POST"],
 )
+@validate_bench_and_site
 def update_site_recover(bench, site):
     job = Server().update_site_recover_job(site, bench)
     return {"job": job}
@@ -519,6 +602,7 @@ def update_site_recover(bench, site):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/archive", methods=["POST"]
 )
+@validate_bench_and_site
 def archive_site(bench, site):
     data = request.json
     job = (
@@ -532,6 +616,7 @@ def archive_site(bench, site):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/config", methods=["POST"]
 )
+@validate_bench_and_site
 def site_update_config(bench, site):
     data = request.json
     job = (
@@ -546,6 +631,7 @@ def site_update_config(bench, site):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/usage", methods=["DELETE"]
 )
+@validate_bench_and_site
 def reset_site_usage(bench, site):
     job = Server().benches[bench].sites[site].reset_site_usage_job()
     return {"job": job}
@@ -554,6 +640,7 @@ def reset_site_usage(bench, site):
 @application.route(
     "/benches/<string:bench>/sites/<string:site>/domains", methods=["POST"]
 )
+@validate_bench_and_site
 def site_add_domain(bench, site):
     data = request.json
     job = Server().benches[bench].sites[site].add_domain(data["domain"])
@@ -564,6 +651,7 @@ def site_add_domain(bench, site):
     "/benches/<string:bench>/sites/<string:site>/domains/<string:domain>",
     methods=["DELETE"],
 )
+@validate_bench_and_site
 def site_remove_domain(bench, site, domain):
     job = Server().benches[bench].sites[site].remove_domain(domain)
     return {"job": job}
@@ -573,6 +661,7 @@ def site_remove_domain(bench, site, domain):
     "/benches/<string:bench>/sites/<string:site>/credentials",
     methods=["POST"],
 )
+@validate_bench_and_site
 def site_create_database_access_credentials(bench, site):
     data = request.json
     credentials = (
@@ -590,6 +679,7 @@ def site_create_database_access_credentials(bench, site):
     "/benches/<string:bench>/sites/<string:site>/credentials/revoke",
     methods=["POST"],
 )
+@validate_bench_and_site
 def site_revoke_database_access_credentials(bench, site):
     data = request.json
     return (
@@ -603,6 +693,7 @@ def site_revoke_database_access_credentials(bench, site):
 
 
 @application.route("/benches/<string:bench>/config", methods=["POST"])
+@validate_bench
 def bench_set_config(bench):
     data = request.json
     job = Server().benches[bench].update_config_job(**data)
@@ -681,7 +772,9 @@ def proxy_add_upstream_site(upstream):
 )
 def proxy_remove_upstream_site(upstream, site):
     data = request.json
-    job = Proxy().remove_site_from_upstream_job(upstream, site, data.get("skip_reload", False))
+    job = Proxy().remove_site_from_upstream_job(
+        upstream, site, data.get("skip_reload", False)
+    )
     return {"job": job}
 
 
@@ -834,6 +927,18 @@ def jobs(id=None, ids=None, status=None):
         )
     return jsonify(json.loads(json.dumps(job, default=str)))
 
+@application.route("/agent-jobs")
+@application.route("/agent-jobs/<int:id>")
+@application.route("/agent-jobs/<string:ids>")
+def agent_jobs(id=None, ids=None):
+    if id:
+        job = to_dict(JobModel.get(JobModel.agent_job_id == id))
+        return jsonify(json.loads(json.dumps(job, default=str)))
+    elif ids:
+        ids = ids.split(",")
+        job = list(map(to_dict, JobModel.select().where(JobModel.agent_job_id << ids)))
+        return jsonify(json.loads(json.dumps(job, default=str)))
+
 
 @application.route("/update", methods=["POST"])
 def update_agent():
@@ -880,6 +985,7 @@ def remove_minio_user(username):
     "/benches/<string:bench>/sites/<string:site>/update/saas",
     methods=["POST"],
 )
+@validate_bench_and_site
 def update_saas_plan(bench, site):
     data = request.json
     job = Server().benches[bench].sites[site].update_saas_plan(data["plan"])
@@ -890,6 +996,7 @@ def update_saas_plan(bench, site):
     "/benches/<string:bench>/sites/<string:site>/run_after_migrate_steps",
     methods=["POST"],
 )
+@validate_bench_and_site
 def run_after_migrate_steps(bench, site):
     data = request.json
     job = (
@@ -905,6 +1012,7 @@ def run_after_migrate_steps(bench, site):
     "/benches/<string:bench>/sites/<string:site>/move_to_bench",
     methods=["POST"],
 )
+@validate_bench_and_site
 def move_site_to_bench(bench, site):
     data = request.json
     job = Server().move_site_to_bench(
@@ -919,6 +1027,7 @@ def move_site_to_bench(bench, site):
 
 
 @application.route("/benches/<string:bench>/codeserver", methods=["POST"])
+@validate_bench
 def setup_code_server(bench):
     data = request.json
     job = Server().benches[bench].setup_code_server(**data)
@@ -929,6 +1038,7 @@ def setup_code_server(bench):
 @application.route(
     "/benches/<string:bench>/codeserver/start", methods=["POST"]
 )
+@validate_bench
 def start_code_server(bench):
     data = request.json
     job = Server().benches[bench].start_code_server(**data)
@@ -936,6 +1046,7 @@ def start_code_server(bench):
 
 
 @application.route("/benches/<string:bench>/codeserver/stop", methods=["POST"])
+@validate_bench
 def stop_code_server(bench):
     job = Server().benches[bench].stop_code_server()
     return {"job": job}
@@ -944,12 +1055,9 @@ def stop_code_server(bench):
 @application.route(
     "/benches/<string:bench>/codeserver/archive", methods=["POST"]
 )
+@validate_bench
 def archive_code_server(bench):
-    job = (
-        Server()
-        .benches[bench]
-        .archive_code_server()
-    )
+    job = Server().benches[bench].archive_code_server()
     return {"job": job}
 
 
@@ -960,3 +1068,19 @@ def all_exception_handler(error):
             traceback.format_exception(*sys.exc_info())
         ).splitlines()
     }, 500
+
+@application.errorhandler(BenchNotExistsException)
+def bench_not_found(e):
+    return {
+        "error": "".join(
+            traceback.format_exception(*sys.exc_info())
+        ).splitlines()
+    }, 404
+
+@application.errorhandler(SiteNotExistsException)
+def site_not_found(e):
+    return {
+        "error": "".join(
+            traceback.format_exception(*sys.exc_info())
+        ).splitlines()
+    }, 404

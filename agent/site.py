@@ -625,7 +625,8 @@ print(">>>" + frappe.session.sid + "<<<")
     def tables(self):
         return self.execute(
             "mysql --disable-column-names -B -e 'SHOW TABLES' "
-            f"-h {self.host} -u {self.user} -p{self.password} {self.database}"
+            f"-h {self.host} -u {self.user} -p{self.password} {self.database}",
+            remove_crs=False,
         )["output"].split("\n")
 
     @property
@@ -647,6 +648,20 @@ print(">>>" + frappe.session.sid + "<<<")
             else {}
         )
         return {"backups": backup_files, "offsite": uploaded_files}
+
+    @job("Optimize Tables")
+    def optimize_tables_job(self):
+        return self.optimize_tables()
+
+    @step("Optimize Tables")
+    def optimize_tables(self):
+        tables = [row[0] for row in self.get_database_free_tables()]
+        for table in tables:
+            query = f"OPTIMIZE TABLE `{table}`"
+            self.execute(
+                f"mysql -sN -h {self.host} -u{self.user} -p{self.password}"
+                f" {self.database} -e '{query}'"
+            )
 
     def fetch_latest_backup(self, with_files=True):
         databases, publics, privates, site_configs = [], [], [], []
@@ -695,6 +710,8 @@ print(">>>" + frappe.session.sid + "<<<")
 
         return {
             "database": b2mb(self.get_database_size()),
+            "database_free_tables": self.get_database_free_tables(),
+            "database_free": b2mb(self.get_database_free_size()),
             "public": b2mb(get_size(public_directory)),
             "private": b2mb(
                 get_size(private_directory) - backup_directory_size
@@ -727,6 +744,43 @@ print(">>>" + frappe.session.sid + "<<<")
             return int(database_size)
         except Exception:
             return 0
+
+    def get_database_free_size(self):
+        query = (
+            "SELECT SUM(`data_free`)"
+            " FROM information_schema.tables"
+            f' WHERE `table_schema` = "{self.database}"'
+            " GROUP BY `table_schema`"
+        )
+        command = (
+            f"mysql -sN -h {self.host} -u{self.user} -p{self.password}"
+            f" -e '{query}'"
+        )
+        database_size = self.execute(command).get("output")
+
+        try:
+            return int(database_size)
+        except Exception:
+            return 0
+
+    def get_database_free_tables(self):
+        try:
+            query = (
+                "SELECT `table_name`,"
+                " round((`data_free` / 1024 / 1024), 2)"
+                " FROM information_schema.tables"
+                f' WHERE `table_schema` = "{self.database}"'
+                " AND ((`data_free / (`data_length` + `index_length`)) > 0.2"
+                " OR `data_free` > 100 * 1024 * 1024)"
+            )
+            command = (
+                f"mysql -sN -h {self.host} -u{self.user} -p{self.password}"
+                f" -e '{query}'"
+            )
+            output = self.execute(command).get("output")
+            return [line.split("\t") for line in output.splitlines()]
+        except Exception:
+            return []
 
     @property
     def job_record(self):
