@@ -512,7 +512,7 @@ class Server(Base):
             worker_name = f"agent:worker-{worker}"
             self.execute(f"sudo supervisorctl restart {worker_name}")
 
-        # self.execute("sudo supervisorctl restart agent:web")
+        self.execute("sudo supervisorctl restart agent:web")
         run_patches()
 
     def update_agent_cli(self):
